@@ -83,65 +83,51 @@ ngx_module_t ngx_http_guess_mime_module = {
     NGX_MODULE_V1_PADDING
 };
 
-/* pointer to next handler in the chain */
-static ngx_http_request_body_filter_pt ngx_http_next_request_body_filter;
+static u_char ngx_hello_world[] = "Hello, world!";
 
 /* hook for requests */
-static ngx_int_t ngx_http_guess_mime_filter(ngx_http_request_t *r, ngx_chain_t *in) {
-    u_char *p;
-    ngx_chain_t *cl;
+static ngx_int_t ngx_http_guess_mime_handler(ngx_http_request_t *r, ngx_chain_t *in) {
     ngx_http_guess_mime_conf_t *mod_conf;
+
+    ngx_buf_t *b;
+    ngx_chain_t out;
 
     /* get this module's configuration (scoped to location) */
     mod_conf = ngx_http_get_module_loc_conf(r, ngx_http_guess_mime_module);
 
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-               "catch request body filter not enabled");
-    exit(-1);
-    return NGX_HTTP_FORBIDDEN;
+    fprintf(stderr, "HELLO_WORLD\n");
 
     /* check if enabled */
     if (!mod_conf->enable) {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-               "catch request body filter not enabled");
+        fprintf(stderr, "IGNORE_WORLD\n");
         /* skip */
-        goto done;
+        return NGX_DECLINED;
     }
 
-#if 0
-r->headers_out.status = NGX_HTTP_OK;
-r->headers_out.content_length_n = 100;
-r->headers_out.content_type.len = sizeof("image/gif") - 1;
-r->headers_out.content_type.data = (u_char *) "image/gif";
-ngx_http_send_header(r);
+    /* Set the Content-Type header. */
+    r->headers_out.content_type.len = sizeof("text/plain") - 1;
+    r->headers_out.content_type.data = (u_char *) "text/plain";
 
-#endif
+    /* Allocate a new buffer for sending out the reply. */
+    b = ngx_pcalloc(r->pool, sizeof(ngx_buf_t));
 
-    /* enabled. guessing mime type... */
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-               "catch request body filter");
-    for (cl = in; cl; cl = cl->next) {
-        p = cl->buf->pos;
-        for (p = cl->buf->pos; p < cl->buf->last; p++) {
-            ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                           "catch body in:%02Xd:%c", *p, *p);
-            if (*p == 'X') {
-                ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                               "catch body: found");
-                /*
-                 + As we return NGX_HTTP_FORBIDDEN, the r->keepalive flag
-                 + won't be reset by ngx_http_special_response_handler().
-                 + Make sure to reset it to prevent processing of unread
-                 + parts of the request body.
-                 */
-                r->keepalive = 0;
-                return NGX_HTTP_FORBIDDEN;
-            }
-        }
-    }
+    /* Insertion in the buffer chain. */
+    out.buf = b;
+    out.next = NULL; /* just one buffer */
 
-done:
-    return ngx_http_next_request_body_filter(r, in);
+    b->pos = ngx_hello_world; /* first position in memory of the data */
+    b->last = ngx_hello_world + sizeof(ngx_hello_world); /* last position in memory of the data */
+    b->memory = 1; /* content is in read-only memory */
+    b->last_buf = 1; /* there will be no more buffers in the request */
+
+    /* Sending the headers for the reply. */
+    r->headers_out.status = NGX_HTTP_OK; /* 200 status code */
+    /* Get the content length of the body. */
+    r->headers_out.content_length_n = sizeof(ngx_hello_world);
+    ngx_http_send_header(r); /* Send the headers */
+
+    /* Send the body, and return the status code of the output filter chain. */
+    return ngx_http_output_filter(r, &out);
 }
 
 /* config initalization function */
@@ -175,11 +161,18 @@ static char *ngx_http_guess_mime_merge_conf(ngx_conf_t *conf, void *parent, void
 
 /* initialization callback */
 static ngx_int_t ngx_http_guess_mime_init(ngx_conf_t *conf) {
-    /* save the original next module */
-    ngx_http_next_request_body_filter = ngx_http_top_request_body_filter;
 
-    /* insert ourselves into the list */
-    ngx_http_top_request_body_filter = ngx_http_guess_mime_filter;
+    ngx_http_handler_pt *h;
+    ngx_http_core_main_conf_t *cmcf;
+
+    cmcf = ngx_http_conf_get_module_main_conf(conf, ngx_http_core_module);
+
+    h = ngx_array_push(&cmcf->phases[NGX_HTTP_CONTENT_PHASE].handlers);
+    if (h == NULL) {
+        return NGX_ERROR;
+    }
+
+    *h = (ngx_http_handler_pt)ngx_http_guess_mime_handler;
 
     return NGX_OK;
 }
