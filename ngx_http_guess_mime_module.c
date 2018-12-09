@@ -88,49 +88,68 @@ static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
 static ngx_http_output_body_filter_pt ngx_http_next_body_filter;
 
 static ngx_int_t ngx_http_guess_mime_header_filter(ngx_http_request_t *r) {
+    ngx_http_guess_mime_conf_t *gmcf;
+
+    /* get this module's configuration (scoped to location) */
+    gmcf = ngx_http_get_module_loc_conf(r, ngx_http_guess_mime_module);
+
+    /* check if enabled */
+    if (!gmcf->enable) {
+        /* skip */
+        return ngx_http_next_header_filter(r);
+    }
+
+    /* check to see if we've been called before */
+    if (ngx_http_get_module_ctx(r, ngx_http_guess_mime_module) != NULL) {
+        /* we've been called before! */
+        fprintf(stderr, "ctx != NULL in header\n");
+        return ngx_http_next_header_filter(r);
+    }
+
     fprintf(stderr, "HELLO_WORLD HEADER\n");
-    return ngx_http_next_header_filter(r);
+
+    /* don't send headers for now */
+    return NGX_OK;
 }
 
 /* hook for requests */
 static ngx_int_t ngx_http_guess_mime_body_filter(ngx_http_request_t *r, ngx_chain_t *in) {
     u_char *p;
     ngx_chain_t *cl;
-    ngx_http_guess_mime_conf_t *mod_conf;
+    ngx_table_elt_t *h;
+    ngx_http_guess_mime_conf_t *gmcf;
 
     fprintf(stderr, "HELLO_WORLD BODY\n");
 
     /* get this module's configuration (scoped to location) */
-    mod_conf = ngx_http_get_module_loc_conf(r, ngx_http_guess_mime_module);
+    gmcf = ngx_http_get_module_loc_conf(r, ngx_http_guess_mime_module);
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                "catch request body filter not enabled");
 
     /* check if enabled */
-    if (!mod_conf->enable) {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-               "catch request body filter not enabled");
+    if (!gmcf->enable) {
         /* skip */
         goto done;
     }
 
-#if 0
-r->headers_out.status = NGX_HTTP_OK;
-r->headers_out.content_length_n = 100;
-r->headers_out.content_type.len = sizeof("image/gif") - 1;
-r->headers_out.content_type.data = (u_char *) "image/gif";
-ngx_http_send_header(r);
+    /* check to see if we've been called before */
+    if (ngx_http_get_module_ctx(r, ngx_http_guess_mime_module) != NULL) {
+        /* we've been called before! */
+        fprintf(stderr, "ctx != NULL in body\n");
+        goto done;
+    }
 
-#endif
+    /* set the context so that we know for future requests */
+    ngx_http_set_ctx(r, (void *)0x1, ngx_http_guess_mime_module);
 
     /* enabled. guessing mime type... */
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
                "catch request body filter");
     for (cl = in; cl; cl = cl->next) {
         p = cl->buf->pos;
+        fprintf(stderr, "buffer data:```\n%s```", p);
         for (p = cl->buf->pos; p < cl->buf->last; p++) {
-            ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                           "catch body in:%02Xd:%c", *p, *p);
             if (*p == 'X') {
                 fprintf(stderr, "catch body: found\n");
                 /*
@@ -140,15 +159,32 @@ ngx_http_send_header(r);
                  + parts of the request body.
                  */
                 r->keepalive = 0;
-                r->headers_out.status = NGX_HTTP_OK;
-                r->headers_out.content_length_n = 100;
-                r->headers_out.content_type.len = sizeof("image/gif") - 1;
-                r->headers_out.content_type.data = (u_char *) "image/gif";
+                h = ngx_list_push(&r->headers_out.headers);
+                if (h == NULL) {
+                    return ngx_http_filter_finalize_request(r, &ngx_http_guess_mime_module, NGX_HTTP_INTERNAL_SERVER_ERROR);
+                }
+
+                h->hash = 1;
+                ngx_str_set(&h->key, "Potato-Enabled");
+                ngx_str_set(&h->value, "true");
+                h->lowcase_key = ngx_pnalloc(r->pool, h->key.len);
+                if (h->lowcase_key == NULL) {
+                    return NGX_ERROR;
+                }
+                ngx_strlow(h->lowcase_key, h->key.data, h->key.len);
+
+
+/*                r->headers_out.status = NGX_HTTP_FORBIDDEN;*/
                 ngx_http_send_header(r);
-                return ngx_http_next_body_filter(r, in);
+                return ngx_http_next_body_filter(r, in);/*
+                r->header_sent = 0;*/
+                //return ngx_http_filter_finalize_request(r, &ngx_http_guess_mime_module, NGX_HTTP_NOT_FOUND);
             }
         }
     }
+
+    /* send headers now */
+    ngx_http_send_header(r);
 
 done:
     return ngx_http_next_body_filter(r, in);
@@ -168,8 +204,6 @@ static void *ngx_http_guess_mime_create_conf(ngx_conf_t *cf) {
     /* unknown value right now */
     mod_conf->enable = NGX_CONF_UNSET;
 
-    fprintf(stderr, "HELLO_WORLD CONF CREATED\n");
-
     /* return pointer */
     return mod_conf;
 }
@@ -181,7 +215,6 @@ static char *ngx_http_guess_mime_merge_conf(ngx_conf_t *cf, void *parent, void *
 
     /* child takes precendence over parent */
     ngx_conf_merge_value(curr->enable, prev->enable, 0);
-    fprintf(stderr, "HELLO_WORLD CONF MERGED\n");
 
     return NGX_CONF_OK;
 }
