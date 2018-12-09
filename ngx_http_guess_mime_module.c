@@ -15,6 +15,7 @@ typedef struct {
 static void *ngx_http_guess_mime_create_conf(ngx_conf_t *cf);
 static char *ngx_http_guess_mime_merge_conf(ngx_conf_t *cf, void *parent, void *child);
 static ngx_int_t ngx_http_guess_mime_init(ngx_conf_t *cf);
+static ngx_int_t ngx_http_guess_mime_initp(ngx_cycle_t *cycle);
 
 /* provided directives */
 static ngx_command_t ngx_http_guess_mime_commands[] = {
@@ -102,6 +103,7 @@ static ngx_int_t ngx_http_guess_mime_handler(ngx_http_request_t *r, ngx_chain_t 
     gmcf = ngx_http_get_module_loc_conf(r, ngx_http_guess_mime_module);
     log = r->connection->log;
 
+    fprintf(stderr, "r equal? %s\tin = %p\n", r == r->main ? "yes" : "no", in);
     fprintf(stderr, "HELLO_WORLD\n");
 
     /* check if enabled */
@@ -121,6 +123,9 @@ static ngx_int_t ngx_http_guess_mime_handler(ngx_http_request_t *r, ngx_chain_t 
     }
 
     fprintf(stderr, "USE_WORLD\n");
+    if (in) {
+        return NGX_AGAIN;
+    }
 
     /* ok, we have confirmed that we want magic to happen */
 
