@@ -15,8 +15,13 @@ typedef struct {
 static void *ngx_http_guess_mime_create_conf(ngx_conf_t *cf);
 static char *ngx_http_guess_mime_merge_conf(ngx_conf_t *cf, void *parent, void *child);
 static ngx_int_t ngx_http_guess_mime_init(ngx_conf_t *cf);
+static ngx_int_t ngx_http_guess_mime_initp(ngx_cycle_t *cycle);
+static void ngx_http_guess_mime_exitp(ngx_cycle_t *cycle);
 
-/* provided directives */
+/* libmagic stuff */
+static magic_t ngx_http_guess_mime_magic_cookie;
+
+/* directives provided by this module */
 static ngx_command_t ngx_http_guess_mime_commands[] = {
     {
         /* directive string */
@@ -70,13 +75,13 @@ ngx_module_t ngx_http_guess_mime_module = {
     /* init module callback */
     NULL,
     /* init process callback */
-    NULL,
+    ngx_http_guess_mime_initp,
     /* init thread callback */
     NULL,
     /* exit thread callback */
     NULL,
     /* exit process callback */
-    NULL,
+    ngx_http_guess_mime_exitp,
     /* exit master callback */
     NULL,
     /* mandatory padding */
@@ -87,6 +92,7 @@ ngx_module_t ngx_http_guess_mime_module = {
 static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
 static ngx_http_output_body_filter_pt ngx_http_next_body_filter;
 
+/* hook for requests - header (this only delays the header sending) */
 static ngx_int_t ngx_http_guess_mime_header_filter(ngx_http_request_t *r) {
     ngx_http_guess_mime_conf_t *gmcf;
 
@@ -100,93 +106,77 @@ static ngx_int_t ngx_http_guess_mime_header_filter(ngx_http_request_t *r) {
     }
 
     /* check to see if we've been called before */
-    if (ngx_http_get_module_ctx(r, ngx_http_guess_mime_module) != NULL) {
+    if (ngx_http_get_module_ctx(r, ngx_http_guess_mime_module)) {
         /* we've been called before! */
-        fprintf(stderr, "ctx != NULL in header\n");
         return ngx_http_next_header_filter(r);
     }
 
-    fprintf(stderr, "HELLO_WORLD HEADER\n");
-
-    /* don't send headers for now */
+    /* don't send headers for now since we will change them in the body filter */
     return NGX_OK;
 }
 
-/* hook for requests */
+/* hook for requests - body (this reads the body) */
 static ngx_int_t ngx_http_guess_mime_body_filter(ngx_http_request_t *r, ngx_chain_t *in) {
-    u_char *p;
-    ngx_chain_t *cl;
-    ngx_table_elt_t *h;
+    const char *lmr;
     ngx_http_guess_mime_conf_t *gmcf;
-
-    fprintf(stderr, "HELLO_WORLD BODY\n");
+    ngx_http_core_loc_conf_t *clcf;
+    ngx_str_t ms;
 
     /* get this module's configuration (scoped to location) */
     gmcf = ngx_http_get_module_loc_conf(r, ngx_http_guess_mime_module);
 
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-               "catch request body filter not enabled");
-
     /* check if enabled */
     if (!gmcf->enable) {
         /* skip */
-        goto done;
+        return ngx_http_next_body_filter(r, in);
     }
 
     /* check to see if we've been called before */
-    if (ngx_http_get_module_ctx(r, ngx_http_guess_mime_module) != NULL) {
-        /* we've been called before! */
-        fprintf(stderr, "ctx != NULL in body\n");
+    if (ngx_http_get_module_ctx(r, ngx_http_guess_mime_module)) {
+        /* we've been called before, skip doing anything interesting */
+        return ngx_http_next_body_filter(r, in);
+    }
+
+    /* set the context so that we know we have been called already */
+    ngx_http_set_ctx(r, (void *)0x1, ngx_http_guess_mime_module);
+
+    /* get core configuration */
+    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+
+    /* try to use the default guessing */
+    if (ngx_http_set_content_type(r) != NGX_OK) return NGX_ERROR;
+
+    /* check if an actual guess was made instead of fallback */
+    if (r->headers_out.content_type.data != clcf->default_type.data) {
+        /* guess made, use it */
         goto done;
     }
 
-    /* set the context so that we know for future requests */
-    ngx_http_set_ctx(r, (void *)0x1, ngx_http_guess_mime_module);
+    /* bad guess, run libmagic */
+    lmr = magic_buffer(ngx_http_guess_mime_magic_cookie, in->buf->pos, in->buf->last - in->buf->pos);
 
-    /* enabled. guessing mime type... */
-    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-               "catch request body filter");
-    for (cl = in; cl; cl = cl->next) {
-        p = cl->buf->pos;
-        fprintf(stderr, "buffer data:```\n%s```", p);
-        for (p = cl->buf->pos; p < cl->buf->last; p++) {
-            if (*p == 'X') {
-                fprintf(stderr, "catch body: found\n");
-                /*
-                 + As we return NGX_HTTP_FORBIDDEN, the r->keepalive flag
-                 + won't be reset by ngx_http_special_response_handler().
-                 + Make sure to reset it to prevent processing of unread
-                 + parts of the request body.
-                 */
-                r->keepalive = 0;
-                h = ngx_list_push(&r->headers_out.headers);
-                if (h == NULL) {
-                    return ngx_http_filter_finalize_request(r, &ngx_http_guess_mime_module, NGX_HTTP_INTERNAL_SERVER_ERROR);
-                }
-
-                h->hash = 1;
-                ngx_str_set(&h->key, "Potato-Enabled");
-                ngx_str_set(&h->value, "true");
-                h->lowcase_key = ngx_pnalloc(r->pool, h->key.len);
-                if (h->lowcase_key == NULL) {
-                    return NGX_ERROR;
-                }
-                ngx_strlow(h->lowcase_key, h->key.data, h->key.len);
-
-
-/*                r->headers_out.status = NGX_HTTP_FORBIDDEN;*/
-                ngx_http_send_header(r);
-                return ngx_http_next_body_filter(r, in);/*
-                r->header_sent = 0;*/
-                //return ngx_http_filter_finalize_request(r, &ngx_http_guess_mime_module, NGX_HTTP_NOT_FOUND);
-            }
-        }
+    if (!lmr) {
+        /* error running libmagic */
+        fprintf(stderr, "error: %s\n", magic_error(ngx_http_guess_mime_magic_cookie));
+        return NGX_ERROR;
     }
 
+    ms.data = (unsigned char *)lmr;
+    ms.len = strlen(lmr);
+
+    r->headers_out.content_type_len = ms.len;
+    r->headers_out.content_type = ms;
+
+    /* TODO: mime encoding with libmagic *//*
+    h->hash = 1;
+    ngx_str_set(&h->key, "Content-Encoding");
+    ngx_str_set(&h->value, "gzip");
+    r->headers_out.content_encoding = h;*/
+
+done:
     /* send headers now */
     ngx_http_send_header(r);
 
-done:
     return ngx_http_next_body_filter(r, in);
 }
 
@@ -228,7 +218,34 @@ static ngx_int_t ngx_http_guess_mime_init(ngx_conf_t *cf) {
     /* insert ourselves into the list */
     ngx_http_top_header_filter = ngx_http_guess_mime_header_filter;
     ngx_http_top_body_filter = ngx_http_guess_mime_body_filter;
-    fprintf(stderr, "HELLO_WORLD INITIALIZED\n. Next header: %p;Next body:%p\n", ngx_http_next_header_filter, ngx_http_next_body_filter);
+    fprintf(stderr, "Next header: %p;Next body:%p\n", ngx_http_next_header_filter, ngx_http_next_body_filter);
 
     return NGX_OK;
+}
+
+/* process initialization callback */
+static ngx_int_t ngx_http_guess_mime_initp(ngx_cycle_t *cycle) {
+    /* initialize libmagic */
+    /* note that we do this per-process because libmagic is not threadsafe. */
+    ngx_http_guess_mime_magic_cookie = magic_open(MAGIC_MIME_TYPE);
+
+    /* check libmagic initialization status */
+    if (!ngx_http_guess_mime_magic_cookie) {
+        fprintf(stderr, "unable to initialize magic library\n");
+        return NGX_ERROR;
+    }
+
+    /* try to load the magic */
+    if (magic_load(ngx_http_guess_mime_magic_cookie, NULL)) {
+        fprintf(stderr, "cannot load magic database - %s\n", magic_error(ngx_http_guess_mime_magic_cookie));
+        magic_close(ngx_http_guess_mime_magic_cookie);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+static void ngx_http_guess_mime_exitp(ngx_cycle_t *cycle) {
+    /* close libmagic handle */
+    magic_close(ngx_http_guess_mime_magic_cookie);
 }

@@ -45,7 +45,7 @@ http {
         root $TESTROOT;
 
         location / {
-            guess_mime on;
+            guess_mime off;
         }
     }
 
