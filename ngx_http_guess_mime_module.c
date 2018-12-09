@@ -120,7 +120,6 @@ static ngx_int_t ngx_http_guess_mime_body_filter(ngx_http_request_t *r, ngx_chai
     const char *lmr;
     ngx_http_guess_mime_conf_t *gmcf;
     ngx_http_core_loc_conf_t *clcf;
-    ngx_str_t ms;
 
     /* get this module's configuration (scoped to location) */
     gmcf = ngx_http_get_module_loc_conf(r, ngx_http_guess_mime_module);
@@ -140,10 +139,11 @@ static ngx_int_t ngx_http_guess_mime_body_filter(ngx_http_request_t *r, ngx_chai
     /* set the context so that we know we have been called already */
     ngx_http_set_ctx(r, (void *)0x1, ngx_http_guess_mime_module);
 
-    /* get core configuration */
+    /* get core configuration so we can read the default type later */
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
     /* try to use the default guessing */
+    /* todo: configurable overwrite of content type */
     if (ngx_http_set_content_type(r) != NGX_OK) return NGX_ERROR;
 
     /* check if an actual guess was made instead of fallback */
@@ -153,30 +153,36 @@ static ngx_int_t ngx_http_guess_mime_body_filter(ngx_http_request_t *r, ngx_chai
     }
 
     /* bad guess, run libmagic */
+    /*
+     * notice here that we only run libmagic on the first buffer.
+     * this is an intentional choice, since i don't want to use up all of the memory
+     * for larger files (libmagic needs a single contiguous buffer)
+     */
+    /* TODO: configurable whether or not to read the entire buffer */
     lmr = magic_buffer(ngx_http_guess_mime_magic_cookie, in->buf->pos, in->buf->last - in->buf->pos);
 
     if (!lmr) {
         /* error running libmagic */
-        fprintf(stderr, "error: %s\n", magic_error(ngx_http_guess_mime_magic_cookie));
-        return NGX_ERROR;
+        ngx_log_error(NGX_LOG_WARN, r->connection->log, 0, "Failed to determine MIME type: %s\n", magic_error(ngx_http_guess_mime_magic_cookie));
+        goto done;
     }
 
-    ms.data = (unsigned char *)lmr;
-    ms.len = strlen(lmr);
-
-    r->headers_out.content_type_len = ms.len;
-    r->headers_out.content_type = ms;
+    /* overwrite the old, bad, content-type */
+    r->headers_out.content_type_len = strlen(lmr);
+    r->headers_out.content_type.data = (u_char *)lmr;
+    r->headers_out.content_type.len = r->headers_out.content_type_len;
 
     /* TODO: mime encoding with libmagic *//*
     h->hash = 1;
     ngx_str_set(&h->key, "Content-Encoding");
-    ngx_str_set(&h->value, "gzip");
+    ngx_str_set(&h->value, "whatever");
     r->headers_out.content_encoding = h;*/
 
 done:
     /* send headers now */
     ngx_http_send_header(r);
 
+    /* move to next body filter */
     return ngx_http_next_body_filter(r, in);
 }
 
@@ -218,7 +224,6 @@ static ngx_int_t ngx_http_guess_mime_init(ngx_conf_t *cf) {
     /* insert ourselves into the list */
     ngx_http_top_header_filter = ngx_http_guess_mime_header_filter;
     ngx_http_top_body_filter = ngx_http_guess_mime_body_filter;
-    fprintf(stderr, "Next header: %p;Next body:%p\n", ngx_http_next_header_filter, ngx_http_next_body_filter);
 
     return NGX_OK;
 }
@@ -231,13 +236,13 @@ static ngx_int_t ngx_http_guess_mime_initp(ngx_cycle_t *cycle) {
 
     /* check libmagic initialization status */
     if (!ngx_http_guess_mime_magic_cookie) {
-        fprintf(stderr, "unable to initialize magic library\n");
+        ngx_log_stderr(0, "unable to initialize libmagic\n");
         return NGX_ERROR;
     }
 
     /* try to load the magic */
     if (magic_load(ngx_http_guess_mime_magic_cookie, NULL)) {
-        fprintf(stderr, "cannot load magic database - %s\n", magic_error(ngx_http_guess_mime_magic_cookie));
+        ngx_log_stderr(0, "cannot load libmagic database: %s\n", magic_error(ngx_http_guess_mime_magic_cookie));
         magic_close(ngx_http_guess_mime_magic_cookie);
         return NGX_ERROR;
     }
