@@ -9,10 +9,12 @@ $TESTROOT/nginx -s stop
 
 set -e
 
+# please have a working nginx in nginx/
+
 cd nginx
 [ $PATHROOT/ngx_http_guess_mime_module.c -ot $TESTROOT/nginx ] &&
     ./configure \
-    --add-module=$PATHROOT/catch_body --add-module=$PATHROOT \
+    --add-module=$PATHROOT \
     --prefix=$PATHROOT/nginx-tests \
     --conf-path=$TESTROOT/test.conf \
     --http-log-path=$TESTROOT/access.log \
@@ -36,6 +38,7 @@ events {
 }
 
 http {
+    guess_mime on;
 
     server {
         listen 9005;
